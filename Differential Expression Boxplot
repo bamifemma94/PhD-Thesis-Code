@@ -1,0 +1,135 @@
+###############################################################
+# Script: 04_GeneExpression_Boxplots.R
+# Author: [Your Name or GitHub handle]
+# Date: [Month Year]
+# -------------------------------------------------------------
+# Purpose:
+#   Visualise gene expression patterns across disease stages
+#   (Normal → VEDOSS → SSc) using boxplots with statistical
+#   comparisons from either t-test, Wilcoxon, or limma.
+#
+# Input:
+#   Expression matrix (CSV) with columns:
+#     Patient, DiseaseType, and gene expression values.
+#
+# Output:
+#   - Publication-quality faceted boxplots
+#   - CSV with filtered expression data for GraphPad
+###############################################################
+
+# --- Load required libraries ---
+library(ggplot2)
+library(reshape2)
+library(ggpubr)
+library(dplyr)
+library(tidyr)
+library(limma)
+
+# --- Define input file and output directory ---
+expr_file  <- "data/Jan30_subepidermal_filtered.csv"
+output_dir <- "output/boxplots"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# --- Load dataset ---
+expr_all <- read.csv(expr_file, row.names = 1, check.names = FALSE)
+cat("Expression matrix loaded with", nrow(expr_all), "samples and", ncol(expr_all), "columns.\n")
+
+# --- Extract metadata ---
+metadata <- expr_all[, c("Patient", "DiseaseType"), drop = FALSE]
+expr_data <- expr_all[, !(colnames(expr_all) %in% c("Patient", "DiseaseType"))]
+
+# --- Prepare data ---
+expr_data <- as.data.frame(expr_data)
+expr_data$DiseaseType <- metadata$DiseaseType
+expr_data$DiseaseType <- factor(expr_data$DiseaseType, levels = c("Normal", "VEDOSS", "SSc"))
+
+# --- Define genes of interest (example: Cyclophilin Pathway) ---
+genes_of_interest <- c(
+  "APOE","B2M","BIRC5","CCND1","CD47","CREB3","CREBBP","HIF1A","HNRNPA1",
+  "HSPA8","IRF3","KLF2","LRP1","MAPK1","MAPK14","NFKB2","PIAS3","PIK3C2B",
+  "PIK3R2","PLK1","PPIA","PRDX2","SELE","SF3B4","SLC25A5","TIMM23B",
+  "TIMM8A","TOMM40","TSPO"
+)
+
+genes_available <- genes_of_interest[genes_of_interest %in% colnames(expr_data)]
+if (length(genes_available) == 0) stop("No selected genes present in the dataset.")
+
+# --- Filter dataset ---
+expr_filtered <- expr_data[, c(genes_available, "DiseaseType")]
+expr_melted <- melt(expr_filtered, id.vars = "DiseaseType",
+                    variable.name = "Gene", value.name = "Expression")
+
+# --- Option A: Simple t-test or Wilcoxon (choose method) ---
+comparison_list <- list(c("Normal", "VEDOSS"), c("VEDOSS", "SSc"), c("Normal", "SSc"))
+stat_method <- "wilcox.test"  # or "t.test"
+
+p_box <- ggplot(expr_melted, aes(x = DiseaseType, y = Expression, fill = DiseaseType)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.2, size = 1, alpha = 0.4) +
+  stat_compare_means(comparisons = comparison_list, method = stat_method, label = "p.signif") +
+  facet_wrap(~Gene, scales = "free_y", ncol = 5) +
+  scale_fill_manual(values = c("Normal" = "#4575B4", "VEDOSS" = "#FE9929", "SSc" = "#D73027")) +
+  theme_minimal(base_size = 12) +
+  labs(title = "Cyclophilin Pathway Gene Expression",
+       x = "Disease Type", y = "Expression Level") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(face = "bold", size = 9))
+print(p_box)
+
+# --- Option B: limma significance bars (optional advanced) ---
+use_limma <- FALSE  # Set to TRUE if you want limma results instead
+if (use_limma) {
+  design <- model.matrix(~0 + expr_filtered$DiseaseType)
+  colnames(design) <- levels(expr_filtered$DiseaseType)
+  expr_matrix <- as.matrix(expr_filtered[, genes_available])
+  
+  fit <- lmFit(t(expr_matrix), design)
+  contrast_matrix <- makeContrasts(
+    VEDOSSvsNormal = VEDOSS - Normal,
+    SScvsNormal = SSc - Normal,
+    SScvsVEDOSS = SSc - VEDOSS,
+    levels = design
+  )
+  fit2 <- eBayes(contrasts.fit(fit, contrast_matrix))
+  
+  # Extract and merge p-values
+  extract_pvals <- function(coef, label, g1, g2) {
+    df <- topTable(fit2, coef = coef, number = Inf, adjust.method = "none")
+    tibble(Gene = rownames(df), p = df$P.Value,
+           group1 = g1, group2 = g2, contrast = label)
+  }
+  pvals <- bind_rows(
+    extract_pvals("VEDOSSvsNormal","VEDOSS vs Normal","Normal","VEDOSS"),
+    extract_pvals("SScvsNormal","SSc vs Normal","Normal","SSc"),
+    extract_pvals("SScvsVEDOSS","SSc vs VEDOSS","VEDOSS","SSc")
+  )
+  
+  # Y-position for stars
+  y_pos <- expr_melted %>%
+    group_by(Gene) %>%
+    summarise(y.position = max(Expression, na.rm = TRUE) * 1.1, .groups = "drop")
+  
+  pvals <- left_join(pvals, y_pos, by = "Gene") %>%
+    mutate(p.signif = case_when(
+      p <= 0.001 ~ "***", p <= 0.01 ~ "**", p <= 0.05 ~ "*", TRUE ~ "ns"
+    ))
+  
+  p_box <- ggplot(expr_melted, aes(x = DiseaseType, y = Expression, fill = DiseaseType)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.2, size = 0.8, alpha = 0.4) +
+    stat_pvalue_manual(data = pvals, label = "p.signif",
+                       xmin = "group1", xmax = "group2",
+                       y.position = "y.position", tip.length = 0.01) +
+    facet_wrap(~Gene, scales = "free_y", ncol = 5) +
+    scale_fill_manual(values = c("Normal" = "#4575B4", "VEDOSS" = "#FE9929", "SSc" = "#D73027")) +
+    theme_minimal(base_size = 12) +
+    labs(title = "Cyclophilin Pathway (limma significance)",
+         x = "Disease Type", y = "Expression Level")
+  print(p_box)
+}
+
+# --- Save outputs ---
+write.csv(expr_filtered, file.path(output_dir, "Cyclophilin_Pathway_Expression.csv"), row.names = TRUE)
+ggsave(file.path(output_dir, "Cyclophilin_Pathway_Boxplots.png"),
+       plot = p_box, width = 12, height = 8, dpi = 300)
+cat("✓ Boxplots and CSV exported to:", output_dir, "\n")
