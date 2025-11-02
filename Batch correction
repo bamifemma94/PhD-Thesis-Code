@@ -1,0 +1,101 @@
+##############################################################
+# Script: 01_BatchCorrection.R
+# Purpose: Perform batch effect correction using ComBat and limma
+# Author: [Your Name or GitHub handle]
+# Date: [Month Year]
+# ------------------------------------------------------------
+# Description:
+# This script performs batch correction on Q3-normalised expression data 
+# using ComBat (sva package) and limma’s removeBatchEffect function.
+# It includes PCA visualisation before and after correction.
+##############################################################
+
+# --- Install required packages if not installed ---
+packages <- c("readr", "ggplot2", "limma", "Rtsne", "sva")
+install_if_missing <- setdiff(packages, rownames(installed.packages()))
+if(length(install_if_missing) > 0) install.packages(install_if_missing)
+
+# --- Load libraries ---
+library(readr)
+library(ggplot2)
+library(limma)
+library(Rtsne)
+library(sva)
+
+# --- Load Q3-normalised data ---
+# Replace the file path below with your dataset location (CSV format)
+file_path <- "data/full_normalisation.csv"  
+data <- read.csv(file_path, row.names = 1, check.names = FALSE)
+
+# --- Preview data ---
+head(data)
+cat("Data dimensions:", dim(data), "\n")
+
+# --- Define batch information ---
+# Example: 92 samples in Batch 1, 128 in Batch 2
+batches <- c(rep("Batch1", 92), rep("Batch2", 128))
+
+# Validate batch vector length
+if(length(batches) != ncol(data)) {
+  stop("❌ The number of batches does not match the number of samples!")
+}
+names(batches) <- colnames(data)
+batches <- factor(batches)
+
+# --- Clean column names and ensure numeric data ---
+colnames(data) <- make.names(colnames(data), unique = TRUE)
+data <- as.data.frame(lapply(data, as.numeric))
+data_matrix <- as.matrix(data)
+
+# --- Filter out rows with no variance or all zeros ---
+constant_rows <- apply(data_matrix, 1, function(x) length(unique(x)) == 1)
+zero_rows <- apply(data_matrix, 1, function(x) all(x == 0))
+problematic_rows <- constant_rows | zero_rows
+data_matrix <- data_matrix[!problematic_rows, ]
+cat("Data dimensions after filtering:", dim(data_matrix), "\n")
+
+# --- PCA before correction ---
+pca_before <- prcomp(t(data_matrix), scale. = TRUE)
+pca_data_before <- as.data.frame(pca_before$x)
+pca_data_before$Batch <- batches
+
+ggplot(pca_data_before, aes(x = PC1, y = PC2, colour = Batch)) +
+  geom_point(size = 3) +
+  ggtitle("PCA Before Batch Correction") +
+  theme_minimal()
+
+# --- Perform ComBat batch correction ---
+# Convert batch labels to numeric if needed
+batch_numeric <- as.numeric(batches)
+corrected_data <- ComBat(dat = as.matrix(data_matrix), batch = batch_numeric, mod = NULL)
+
+# --- PCA after ComBat correction ---
+pca_after <- prcomp(t(corrected_data), scale. = TRUE)
+pca_data_after <- as.data.frame(pca_after$x)
+pca_data_after$Batch <- batches
+
+ggplot(pca_data_after, aes(x = PC1, y = PC2, colour = Batch)) +
+  geom_point(size = 3) +
+  ggtitle("PCA After Batch Correction (ComBat)") +
+  theme_minimal()
+
+# --- Optional: Limma batch correction ---
+corrected_data_limma <- removeBatchEffect(data_matrix, batch = batches)
+pca_after_limma <- prcomp(t(corrected_data_limma), scale. = TRUE)
+pca_data_after_limma <- as.data.frame(pca_after_limma$x)
+pca_data_after_limma$Batch <- batches
+
+ggplot(pca_data_after_limma, aes(x = PC1, y = PC2, colour = Batch)) +
+  geom_point(size = 3) +
+  ggtitle("PCA After Batch Correction (limma)") +
+  theme_minimal()
+
+# --- Save results ---
+# Output directory (replace as needed)
+output_dir <- "output"
+if(!dir.exists(output_dir)) dir.create(output_dir)
+
+output_path <- file.path(output_dir, "batch_corrected_data.csv")
+write.csv(corrected_data, file = output_path, row.names = TRUE)
+
+cat("✅ Batch-corrected data saved successfully at:", output_path, "\n")
