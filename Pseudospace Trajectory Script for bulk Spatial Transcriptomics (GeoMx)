@@ -1,0 +1,160 @@
+###############################################################
+# Script: 02_DiseaseTrajectory_PseudospaceAnalysis.R
+# Author: [Your Name or GitHub handle]
+# Date: [Month Year]
+# -------------------------------------------------------------
+# Purpose:
+#   Perform region-specific disease trajectory (pseudospace)
+#   analysis across Healthy Control → VEDOSS → SSc.
+#
+# Approach:
+#   - Correlate each gene’s expression with disease progression
+#     score using Spearman correlation.
+#   - Identify genes increasing or decreasing with disease stage.
+#   - Save CSV outputs per region.
+#
+# Input:
+#   Cleaned expression matrices per region in /data/
+# Output:
+#   Correlation results (all, increasing, decreasing) in /output/pseudospace/
+###############################################################
+
+# --- Load libraries ---
+library(tidyverse)
+
+# --- Define input and output paths ---
+epi_file  <- "data/Jan30Epidermisfiltered_expression_matrix_transposed.csv"
+peri_file <- "data/Jan30Subepidermalfiltered_expression_matrix_transposed.csv"
+derm_file <- "data/Jan30_dermis_filtered.csv"
+output_dir <- "output/pseudospace"
+
+# Create output directory if missing
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+  cat("✓ Created output directory:", output_dir, "\n")
+}
+
+# --- Load region datasets ---
+epi  <- read.csv(epi_file, check.names = FALSE)
+peri <- read.csv(peri_file, check.names = FALSE)
+derm <- read.csv(derm_file, check.names = FALSE)
+
+epi$Region  <- "Epidermis"
+peri$Region <- "Perivascular"
+derm$Region <- "Dermis"
+
+combined <- bind_rows(epi, peri, derm)
+
+# --- Prepare metadata and expression matrices ---
+metadata <- combined %>% select(DiseaseType, Patient, Region)
+expression <- combined %>% select(-DiseaseType, -Patient, -Region)
+
+# Ensure numeric data
+expression <- expression %>% mutate(across(everything(), as.numeric))
+
+# Assign disease progression scores
+metadata$DiseaseType <- factor(metadata$DiseaseType,
+                               levels = c("Normal", "VEDOSS", "SSc"),
+                               labels = c("Healthy Control", "VEDOSS", "SSc"))
+metadata$DiseaseScore <- case_when(
+  metadata$DiseaseType == "Healthy Control" ~ 0,
+  metadata$DiseaseType == "VEDOSS" ~ 1,
+  metadata$DiseaseType == "SSc" ~ 2
+)
+
+cat("Analyzing", ncol(expression), "genes across", nrow(expression), "samples\n")
+
+###############################################################
+# FUNCTION: Correlate each gene with disease progression score
+###############################################################
+get_disease_trajectory_genes <- function(expression_subset, disease_score, region_name) {
+  cat("\n=== Analyzing", region_name, "trajectory ===\n")
+
+  results <- map_dfr(
+    colnames(expression_subset),
+    function(gene) {
+      vals <- expression_subset[[gene]]
+      if (sum(!is.na(vals)) < 5) return(NULL)
+      test <- suppressWarnings(cor.test(disease_score, vals,
+                                        method = "spearman", use = "complete.obs"))
+      tibble(
+        Gene = gene,
+        correlation = test$estimate,
+        p_value = test$p.value,
+        mean_expr = mean(vals, na.rm = TRUE)
+      )
+    }
+  )
+
+  results <- results %>%
+    mutate(
+      direction = ifelse(correlation > 0, "Increasing", "Decreasing"),
+      significance = case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01  ~ "**",
+        p_value < 0.01  ~ "*",
+        TRUE ~ "ns"
+      )
+    ) %>%
+    arrange(desc(abs(correlation)))
+
+  cat("  Significant (p<0.01):", sum(results$p_value < 0.01), "\n")
+  list(
+    all = results,
+    inc = filter(results, p_value < 0.01, correlation > 0),
+    dec = filter(results, p_value < 0.01, correlation < 0)
+  )
+}
+
+###############################################################
+# RUN ANALYSIS PER REGION
+###############################################################
+results_by_region <- list()
+
+for (region in c("Epidermis", "Perivascular", "Dermis")) {
+  cat("\n--------------------------------------------\n")
+  cat("Processing:", region, "\n")
+  cat("--------------------------------------------\n")
+
+  idx <- metadata$Region == region
+  meta_region <- metadata[idx, ]
+  expr_region <- expression[idx, ]
+
+  results_by_region[[region]] <- get_disease_trajectory_genes(
+    expr_region, meta_region$DiseaseScore, region
+  )
+
+  # Save outputs
+  safe_name <- gsub(" ", "_", region)
+  write.csv(results_by_region[[region]]$all,
+            file.path(output_dir, paste0("disease_trajectory_", safe_name, "_all.csv")),
+            row.names = FALSE)
+  write.csv(results_by_region[[region]]$inc,
+            file.path(output_dir, paste0("disease_trajectory_", safe_name, "_increasing.csv")),
+            row.names = FALSE)
+  write.csv(results_by_region[[region]]$dec,
+            file.path(output_dir, paste0("disease_trajectory_", safe_name, "_decreasing.csv")),
+            row.names = FALSE)
+
+  cat("✓ Saved CSVs for", region, "\n")
+}
+
+###############################################################
+# SUMMARY
+###############################################################
+cat("\n=============================================\n")
+cat("REGION-SPECIFIC PSEUDOSPACE ANALYSIS COMPLETE\n")
+cat("=============================================\n\n")
+
+for (region in names(results_by_region)) {
+  inc_n <- nrow(results_by_region[[region]]$inc)
+  dec_n <- nrow(results_by_region[[region]]$dec)
+  cat(region, ":\n  Increasing genes:", inc_n, 
+      "\n  Decreasing genes:", dec_n, "\n\n")
+}
+
+cat("All output files saved to:", output_dir, "\n")
+cat("  → disease_trajectory_[Region]_all.csv\n")
+cat("  → disease_trajectory_[Region]_increasing.csv\n")
+cat("  → disease_trajectory_[Region]_decreasing.csv\n")
+cat("\n✓ Ready for visualization using PseudospaceTrajectoryPlots.R\n")
