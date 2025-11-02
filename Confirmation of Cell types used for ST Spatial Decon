@@ -1,0 +1,119 @@
+##############################################################
+# Script: 02_SpatialDecon_CellTypeConfirmation.R
+# Purpose: Confirm cell types used for spatial deconvolution
+# Author: [Your Name or GitHub handle]
+# Date: [Month Year]
+# ------------------------------------------------------------
+# Description:
+# This script:
+#   1. Calculates average gene expression per cell type
+#   2. Computes log2 fold changes for each gene
+#   3. Identifies top marker genes per cell type
+#   4. Plots top genes and canonical markers as heatmaps
+#   5. Confirms canonical cell-type representation for spatial deconvolution
+##############################################################
+
+# --- Load libraries ---
+library(dplyr)
+library(pheatmap)
+
+# --- Step 1: Load data ---
+# Replace 'data/mydata2.csv' with your own dataset path.
+data <- read.csv("data/mydata2.csv", row.names = 1)
+
+cat("Data dimensions:\n")
+print(dim(data))
+cat("First few rows:\n")
+print(head(data))
+
+# --- Step 2: Calculate average expression per cell type ---
+avg_expression <- aggregate(t(data), by = list(colnames(data)), FUN = mean)
+avg_expression <- t(avg_expression)
+colnames(avg_expression) <- avg_expression[1, ]
+avg_expression <- avg_expression[-1, ]
+avg_expression <- apply(avg_expression, 2, as.numeric)
+rownames(avg_expression) <- rownames(data)
+
+cat("Average expression per cell type:\n")
+print(head(avg_expression))
+
+# --- Step 3: Compute log2 fold change (log2FC) per gene per cell type ---
+log2FC <- apply(avg_expression, 2, function(x) {
+  log2(x + 1) - log2(rowMeans(avg_expression) + 1)
+})
+
+cat("Log2 fold change matrix:\n")
+print(head(log2FC))
+
+# --- Step 4: Identify top 5 genes per cell type ---
+top_log2FC_genes <- apply(log2FC, 2, function(x) {
+  rownames(log2FC)[order(x, decreasing = TRUE)[1:5]]
+})
+
+cat("Top 5 genes for each cell type:\n")
+print(top_log2FC_genes)
+
+# --- Step 5: Visualize top genes in a heatmap ---
+top_genes_all <- unique(as.vector(top_log2FC_genes))
+top_genes_expression <- avg_expression[top_genes_all, ]
+
+pheatmap(
+  top_genes_expression, 
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  fontsize_row = 8,
+  fontsize_col = 8,
+  main = "Top Marker Genes per Cell Type"
+)
+
+# --- Step 6: Define updated canonical markers (Sole-Boldo 2020 reference) ---
+canonical_markers_updated <- list(
+  Erythrocytes = c("HBA1", "HBA2", "HBB"),
+  Keratinocytes = c("KRT5", "KRT14", "TP63", "ITGA6", "ITGB1", "KRT1", "KRT10", "SBSN", "KRTDAP"),
+  Lymphatic_EC = c("PDPN", "LYVE1", "PROX1"),
+  Macrophages_DC = c("CD68", "CD14", "CD163", "AIF1", "LYZ", "HLA-DRA", "ITGAX"),
+  Melanocytes = c("PMEL", "MLANA", "TYR", "DCT", "TYRP1"),
+  Fibroblasts = c("LUM", "DCN", "VIM", "PDGFRA", "COL1A2"),
+  Papillary_Fibroblasts = c("APCDD1", "AXIN2", "PTGDS", "COL18A1"),
+  Reticular_Fibroblasts = c("MGP", "MFAP5", "FBN1", "ELN", "COL1A1", "SLPI"),
+  ProInflammatory_Fibroblasts = c("CCL19", "APOE", "IL6"),
+  Mesenchymal_Fibroblasts = c("ASPN", "POSTN"),
+  Vascular_EC = c("PECAM1", "CDH5", "VWF", "SELE", "CLDN5"),
+  Pericytes = c("PDGFRB", "RGS5", "ACTA2"),
+  T_cells = c("CD3D", "CD3E", "CD4", "CD8A")
+)
+
+# --- Step 7: Confirm canonical marker expression ---
+canonical_genes <- unique(unlist(canonical_markers_updated))
+canonical_genes <- canonical_genes[canonical_genes %in% rownames(avg_expression)]
+
+canonical_avg_expression <- avg_expression[canonical_genes, ]
+
+# Reorder by canonical order
+gene_order <- unlist(canonical_markers_updated)
+gene_order <- gene_order[gene_order %in% rownames(canonical_avg_expression)]
+canonical_avg_expression <- canonical_avg_expression[gene_order, ]
+
+# Plot canonical heatmap
+pheatmap(
+  canonical_avg_expression,
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  fontsize_row = 8,
+  fontsize_col = 10,
+  main = "Canonical Marker Expression (Sole-Boldo 2020)"
+)
+
+# --- Step 8: Optional Bulk SSc Confirmation ---
+# Repeat workflow on bulk data if available
+# bulk_data <- read.csv("data/SSc_bulk.csv", row.names = 1)
+# (Repeat steps 2–7 on bulk_data to validate cell type concordance)
+
+# --- Step 9: Save outputs (optional) ---
+write.csv(top_log2FC_genes, "output/top_genes_per_cell_type.csv")
+write.csv(log2FC, "output/log2FC_matrix.csv")
+write.csv(canonical_avg_expression, "output/canonical_marker_expression.csv")
+
+cat("✅ Analysis complete. Results saved to /output directory.\n")
