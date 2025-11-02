@@ -1,0 +1,91 @@
+#############################################################
+# Differential Expression Analysis with limma + Volcano Plot
+# Author: [Your Name]
+# Description: Example workflow for DE analysis using limma
+# Dataset: Pre-processed expression matrix with metadata
+# Notes: All file paths and identifiers removed for public sharing
+#############################################################
+
+# Load libraries
+library(limma)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+# ---------------------------
+# Load pre-processed data
+# ---------------------------
+# Replace with your own cleaned input file
+# data <- read.csv("path_to_your_data.csv", header = TRUE, row.names = 1)
+
+# Example structure:
+# Columns: SampleID, DiseaseType, Gene1, Gene2, ..., GeneN
+# DiseaseType must have at least two groups (e.g., "VEDOSS", "Normal")
+
+# ---------------------------
+# Prepare Expression Matrix
+# ---------------------------
+# Filter data for the desired tissue or region if applicable
+# filtered_data <- data[data$Location == "Epidermis", ]
+
+# Extract expression matrix and metadata
+expression_matrix <- as.matrix(filtered_data[, !(colnames(filtered_data) %in% c("SampleID", "DiseaseType", "Location"))])
+rownames(expression_matrix) <- filtered_data$SampleID
+expression_matrix <- t(expression_matrix)
+
+# ---------------------------
+# Differential Expression
+# ---------------------------
+disease_type <- factor(filtered_data$DiseaseType)
+design <- model.matrix(~ disease_type)
+
+fit <- lmFit(expression_matrix, design)
+fit <- eBayes(fit)
+
+results <- topTable(fit, coef = 2, adjust.method = "fdr", number = Inf)
+
+# Add log2 transformation for consistent fold-change visualization
+results$logFC_transformed <- sign(results$logFC) * log2(abs(results$logFC) + 1)
+
+# Classify gene significance
+results$Significance <- case_when(
+  results$logFC > 0.5 & results$P.Value < 0.05 ~ "Upregulated",
+  results$logFC < -0.5 & results$P.Value < 0.05 ~ "Downregulated",
+  TRUE ~ "Not Significant"
+)
+
+# ---------------------------
+# Volcano Plot
+# ---------------------------
+volcano_plot <- ggplot(results, aes(x = logFC_transformed, y = -log10(P.Value), color = Significance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "Not Significant" = "grey")) +
+  theme_minimal() +
+  labs(
+    title = "Volcano Plot: Group 1 vs Group 2",
+    x = "Log2 Transformed Fold Change",
+    y = "-Log10 P-Value"
+  ) +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed")
+
+# Label top genes
+top_up <- head(results[results$Significance == "Upregulated", ], 10)
+top_down <- head(results[results$Significance == "Downregulated", ], 10)
+top_genes <- rbind(top_up, top_down)
+
+volcano_plot +
+  geom_text_repel(
+    data = top_genes,
+    aes(label = rownames(top_genes)),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    segment.color = "black",
+    size = 3
+  )
+
+# ---------------------------
+# Save Results
+# ---------------------------
+# write.csv(results, "DE_results_VolcanoPlot.csv", row.names = TRUE)
+#############################################################
