@@ -1,0 +1,203 @@
+###############################################################################
+# Script: 05_CD45_Negative_Cell_Analysis.R
+# Author: [Your Name]
+# Project: Systemic Lupus Erythematosus (SLE) PBMC scRNA-seq Re-analysis
+# Dataset: GSE135779 (Public)
+# Description:
+#   Identify and analyze CD45- (PTPRC-) non-immune cells from PBMC scRNA-seq data.
+#   Includes QC, Harmony integration, CD45 filtering, clustering, disease annotation,
+#   and differential expression analysis.
+###############################################################################
+
+# ==============================
+# 1. Load required packages
+# ==============================
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(ggplot2)
+library(harmony)
+library(patchwork)
+library(ggpubr)
+
+# ==============================
+# 2. Define data directory and input files
+# ==============================
+data_dir <- "data/GSE135779_Adult"   # <--- relative path (not sensitive)
+matrix_files  <- list.files(data_dir, pattern = "_matrix.mtx$", full.names = TRUE)
+barcode_files <- list.files(data_dir, pattern = "_barcodes.tsv$", full.names = TRUE)
+genes_file    <- file.path(data_dir, "GSE135779_genes.tsv")
+
+# ==============================
+# 3. Create Seurat objects per sample
+# ==============================
+seurat_list <- list()
+for (i in seq_along(matrix_files)) {
+  sample_name <- gsub("_matrix.mtx", "", basename(matrix_files[i]))
+  counts <- ReadMtx(mtx = matrix_files[i], features = genes_file, cells = barcode_files[i])
+  seurat_obj <- CreateSeuratObject(counts = counts, project = sample_name)
+  seurat_obj$sample <- sample_name
+  seurat_list[[sample_name]] <- seurat_obj
+}
+
+# ==============================
+# 4. Merge samples and perform QC
+# ==============================
+merged_seurat <- merge(seurat_list[[1]], y = seurat_list[-1],
+                       add.cell.ids = names(seurat_list), project = "GSE135779_Adult")
+
+merged_seurat[["percent.mt"]] <- PercentageFeatureSet(merged_seurat, pattern = "^MT-")
+
+# Basic QC filtering
+merged_seurat_qc <- subset(merged_seurat,
+                           subset = nFeature_RNA > 200 &
+                                    nFeature_RNA < 4000 &
+                                    percent.mt < 10)
+
+# ==============================
+# 5. Normalization and Feature Selection
+# ==============================
+merged_seurat_qc <- NormalizeData(merged_seurat_qc)
+merged_seurat_qc <- FindVariableFeatures(merged_seurat_qc, selection.method = "vst", nfeatures = 2000)
+merged_seurat_qc <- ScaleData(merged_seurat_qc)
+merged_seurat_qc <- RunPCA(merged_seurat_qc, features = VariableFeatures(merged_seurat_qc))
+
+# ==============================
+# 6. Harmony Integration
+# ==============================
+merged_seurat_qc <- RunHarmony(merged_seurat_qc, group.by.vars = "sample")
+merged_seurat_qc <- RunUMAP(merged_seurat_qc, reduction = "harmony", dims = 1:20)
+merged_seurat_qc <- FindNeighbors(merged_seurat_qc, reduction = "harmony", dims = 1:20)
+merged_seurat_qc <- FindClusters(merged_seurat_qc, resolution = 0.5)
+
+# ==============================
+# 7. Identify CD45 (PTPRC) Expression
+# ==============================
+FeaturePlot(merged_seurat_qc, features = "PTPRC", pt.size = 0.5) +
+  ggtitle("CD45 (PTPRC) Expression Across Cells")
+
+# Define CD45+ and CD45- cells
+cd45_pos_cells <- WhichCells(merged_seurat_qc, expression = PTPRC > 0)
+cd45_neg_cells <- WhichCells(merged_seurat_qc, expression = PTPRC == 0)
+
+cat("Total cells:", ncol(merged_seurat_qc), "\n")
+cat("CD45+ cells:", length(cd45_pos_cells), "\n")
+cat("CD45- cells:", length(cd45_neg_cells), "\n")
+
+# Add CD45 status metadata
+merged_seurat_qc$CD45_status <- ifelse(FetchData(merged_seurat_qc, vars = "PTPRC") > 0,
+                                       "CD45+ Cells", "CD45- Cells")
+
+DimPlot(merged_seurat_qc, group.by = "CD45_status", pt.size = 0.4) +
+  scale_color_manual(values = c("CD45+ Cells" = "firebrick", "CD45- Cells" = "steelblue")) +
+  ggtitle("UMAP: CD45+ vs CD45- Populations")
+
+# ==============================
+# 8. Subset to CD45- Cells Only
+# ==============================
+cd45_neg_only <- subset(merged_seurat_qc, cells = cd45_neg_cells)
+
+# ==============================
+# 9. Add Disease Group Metadata
+# ==============================
+disease_group_mapping <- c(
+  "GSM4029940_JB19001" = "Healthy Control",
+  "GSM4029942_JB19003" = "Healthy Control",
+  "GSM4029947_JB19009" = "Healthy Control",
+  "GSM4029948_JB19010" = "Healthy Control",
+  "GSM4029949_JB19011" = "Healthy Control",
+  "GSM4029943_JB19004" = "SLE",
+  "GSM4029944_JB19006" = "SLE",
+  "GSM4029945_JB19007" = "SLE",
+  "GSM4029946_JB19008" = "SLE",
+  "GSM4029950_JB19013" = "SLE",
+  "GSM4029951_JB19014" = "SLE",
+  "GSM4029952_JB19015" = "SLE"
+)
+
+meta <- merged_seurat_qc@meta.data
+meta$DiseaseGroup <- disease_group_mapping[meta$sample]
+merged_seurat_qc@meta.data <- meta
+
+# Apply to CD45- subset
+cd45_neg_meta <- meta[colnames(cd45_neg_only), ]
+cd45_neg_meta$DiseaseGroup <- disease_group_mapping[cd45_neg_meta$sample]
+cd45_neg_only@meta.data <- cd45_neg_meta
+
+# ==============================
+# 10. Re-analysis on CD45- Subset
+# ==============================
+cd45_neg_only <- FindVariableFeatures(cd45_neg_only, nfeatures = 2000)
+cd45_neg_only <- ScaleData(cd45_neg_only)
+cd45_neg_only <- RunPCA(cd45_neg_only, npcs = 50)
+cd45_neg_only <- FindNeighbors(cd45_neg_only, dims = 1:20)
+cd45_neg_only <- FindClusters(cd45_neg_only, resolution = 0.5)
+cd45_neg_only <- RunUMAP(cd45_neg_only, dims = 1:20)
+
+# ==============================
+# 11. Visualize CD45- Cells
+# ==============================
+p1 <- DimPlot(cd45_neg_only, reduction = "umap", group.by = "seurat_clusters", label = TRUE) +
+  ggtitle("Clusters in CD45- Cells")
+
+p2 <- DimPlot(cd45_neg_only, reduction = "umap", group.by = "DiseaseGroup",
+              cols = c("Healthy Control" = "blue", "SLE" = "red")) +
+  ggtitle("Disease Group Distribution")
+
+p1 + p2 + plot_layout(ncol = 2)
+
+# ==============================
+# 12. Marker Identification
+# ==============================
+all_markers <- FindAllMarkers(cd45_neg_only, assay = "RNA", only.pos = TRUE,
+                              min.pct = 0.25, logfc.threshold = 0.25)
+write.csv(all_markers, "results/GSE135779_CD45neg_all_markers.csv", row.names = FALSE)
+
+top5_markers <- all_markers %>%
+  group_by(cluster) %>%
+  top_n(5, wt = avg_log2FC)
+
+DotPlot(cd45_neg_only, features = unique(top5_markers$gene),
+        group.by = "seurat_clusters") +
+  RotatedAxis() + ggtitle("Top 5 Markers per Cluster (CD45-)")
+
+# ==============================
+# 13. Differential Expression (SLE vs Healthy Control)
+# ==============================
+Idents(cd45_neg_only) <- "DiseaseGroup"
+
+deg_disease <- FindMarkers(cd45_neg_only, ident.1 = "SLE", ident.2 = "Healthy Control",
+                           logfc.threshold = 0, min.pct = 0.1)
+
+deg_disease$gene <- rownames(deg_disease)
+deg_disease$significance <- case_when(
+  deg_disease$avg_log2FC > 0.25 & deg_disease$p_val_adj < 0.05 ~ "Upregulated",
+  deg_disease$avg_log2FC < -0.25 & deg_disease$p_val_adj < 0.05 ~ "Downregulated",
+  TRUE ~ "NS"
+)
+
+write.csv(deg_disease, "results/GSE135779_CD45neg_DEG_SLE_vs_Healthy.csv", row.names = FALSE)
+
+# ==============================
+# 14. Volcano Plot
+# ==============================
+top_up   <- deg_disease %>% filter(significance == "Upregulated") %>% top_n(10, avg_log2FC)
+top_down <- deg_disease %>% filter(significance == "Downregulated") %>% top_n(-10, avg_log2FC)
+highlight_genes <- c(top_up$gene, top_down$gene)
+
+ggplot(deg_disease, aes(x = avg_log2FC, y = -log10(p_val_adj), color = significance)) +
+  geom_point(alpha = 0.7) +
+  geom_text(data = subset(deg_disease, gene %in% highlight_genes),
+            aes(label = gene), vjust = 1.2, size = 3, check_overlap = TRUE) +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "NS" = "gray")) +
+  theme_minimal() +
+  labs(title = "Differential Expression: SLE vs Healthy (CD45-)",
+       x = "log2 Fold Change", y = "-log10 Adjusted p-value")
+
+# ==============================
+# 15. Save Outputs
+# ==============================
+saveRDS(cd45_neg_only, "results/CD45neg_with_DiseaseGroup.rds")
+
+cat("✅ CD45- subset analysis completed successfully.\n")
+###############################################################################
