@@ -1,0 +1,176 @@
+###############################################################################
+# Script: 08_Keratinocyte_DE_and_Enrichment_GSE138669.R
+# Author: [Your Name]
+# Project: Systemic Sclerosis – Epidermal Transcriptomic Analysis
+# Dataset: GSE138669
+# Description:
+#   Differential expression (SSc vs Healthy) within keratinocytes,
+#   followed by Reactome enrichment analysis and visualization.
+###############################################################################
+
+# ==============================
+# 1. Load required libraries
+# ==============================
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(enrichplot)
+library(pheatmap)
+
+# ==============================
+# 2. Load annotated Seurat object
+# ==============================
+seurat_path <- "data/scRNA_Cluster_dim_20_annotated.rds"
+scRNA <- readRDS(seurat_path)
+
+# ==============================
+# 3. Annotate clusters
+# ==============================
+cluster_annotations <- c(
+  "Basal Keratinocytes", "Terminal Keratinocytes", "Fibroblast", 
+  "Endothelial Cells", "Endothelial Cells", "Endothelial Cells", 
+  "KRT6A Keratinocyte", "Dendritic Cell", "Fibroblast", "SFRP2+ Fibroblast", 
+  "Dendritic Cell", "Fibroblast", "T-Cell", "CA6 Secretory", 
+  "Smooth Muscle", "Unknown", "Smooth Muscle", "Keratinocytes", 
+  "Keratinocytes", "Schwann Cells", "T cells, NK cells", "Melanocytes", 
+  "Endothelial Cells", "Lymphatic Endothelial Cells", "Fibroblast", 
+  "B Cells", "B Cells"
+)
+
+scRNA$Cluster_Labels <- factor(scRNA$seurat_clusters, levels = 0:26, labels = cluster_annotations)
+Idents(scRNA) <- scRNA$Cluster_Labels
+
+# ==============================
+# 4. Annotate disease groups
+# ==============================
+scRNA$Disease_Group <- ifelse(grepl("SSc", scRNA$orig.ident), "SSc", "Healthy Control")
+table(scRNA$Disease_Group)
+
+# ==============================
+# 5. Subset to keratinocytes
+# ==============================
+keratinocyte_clusters <- c("Basal Keratinocytes", "Terminal Keratinocytes", 
+                           "KRT6A Keratinocyte", "Keratinocytes")
+
+scRNA_Keratinocytes <- subset(scRNA, subset = Cluster_Labels %in% keratinocyte_clusters)
+Idents(scRNA_Keratinocytes) <- "Disease_Group"
+
+DimPlot(scRNA_Keratinocytes, reduction = "umap", group.by = "Disease_Group",
+        split.by = "Disease_Group", pt.size = 0.5) +
+  ggtitle("Keratinocyte Clusters: SSc vs Healthy Control")
+
+# ==============================
+# 6. Differential Expression Analysis
+# ==============================
+keratinocyte_markers <- FindMarkers(scRNA_Keratinocytes,
+                                    ident.1 = "SSc",
+                                    ident.2 = "Healthy Control",
+                                    logfc.threshold = 0.25,
+                                    min.pct = 0.1,
+                                    test.use = "wilcox")
+
+keratinocyte_markers <- keratinocyte_markers %>%
+  mutate(Significance = case_when(
+    p_val_adj < 0.05 & avg_log2FC > 0.25  ~ "Upregulated",
+    p_val_adj < 0.05 & avg_log2FC < -0.25 ~ "Downregulated",
+    TRUE ~ "Not Significant"
+  ))
+
+# Save DE results
+write.csv(keratinocyte_markers, "results/Keratinocyte_DE_SSc_vs_HC.csv", row.names = TRUE)
+
+# ==============================
+# 7. Volcano Plot
+# ==============================
+top_up <- head(keratinocyte_markers[order(-keratinocyte_markers$avg_log2FC), ], 20)
+top_down <- head(keratinocyte_markers[order(keratinocyte_markers$avg_log2FC), ], 20)
+top_genes <- rbind(top_up, top_down)
+
+ggplot(keratinocyte_markers, aes(x = avg_log2FC, y = -log10(p_val_adj), color = Significance)) +
+  geom_point(alpha = 0.7) +
+  geom_text_repel(data = top_genes, aes(label = rownames(top_genes)), size = 3, max.overlaps = 10) +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "Not Significant" = "grey")) +
+  labs(title = "Keratinocyte Differential Expression (SSc vs Healthy Control)",
+       x = "Log2 Fold Change", y = "-log10 Adjusted p-value") +
+  theme_minimal()
+
+# ==============================
+# 8. Reactome Enrichment Analysis
+# ==============================
+# Prepare gene lists
+up_genes   <- rownames(subset(keratinocyte_markers, Significance == "Upregulated"))
+down_genes <- rownames(subset(keratinocyte_markers, Significance == "Downregulated"))
+
+# Map to Entrez IDs
+up_entrez <- bitr(up_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+down_entrez <- bitr(down_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Run ReactomePA
+reactome_up <- enrichPathway(gene = up_entrez$ENTREZID, organism = "human", pAdjustMethod = "BH", qvalueCutoff = 0.05)
+reactome_down <- enrichPathway(gene = down_entrez$ENTREZID, organism = "human", pAdjustMethod = "BH", qvalueCutoff = 0.05)
+
+# Save enrichment results
+write.csv(as.data.frame(reactome_up), "results/Reactome_Upregulated_Keratinocytes.csv", row.names = FALSE)
+write.csv(as.data.frame(reactome_down), "results/Reactome_Downregulated_Keratinocytes.csv", row.names = FALSE)
+
+# ==============================
+# 9. Reactome Visualization
+# ==============================
+## Top 20 enriched pathways
+dotplot(reactome_up, showCategory = 20, title = "Upregulated Reactome Pathways") +
+  scale_color_gradient(low = "blue", high = "red")
+
+dotplot(reactome_down, showCategory = 20, title = "Downregulated Reactome Pathways") +
+  scale_color_gradient(low = "blue", high = "red")
+
+## Network and enrichment map
+emapplot(pairwise_termsim(reactome_up), showCategory = 20)
+emapplot(pairwise_termsim(reactome_down), showCategory = 20)
+
+# ==============================
+# 10. Heatmap of Fibrosis-related Genes
+# ==============================
+fibrosis_genes <- c("ITGB1", "SPARC", "COL16A1", "ITGB5", "COL14A1", "ELN", "COL12A1", 
+                    "SERPINE1", "TNC", "PLOD3", "PLOD1", "LAMC1", "CTSS", "LOXL1", 
+                    "ICAM1", "COMP", "EFEMP2", "ADAMTS2", "EFEMP1", "CAPNS1", "CTSL", 
+                    "CTSK", "TIMP2", "EMILIN1", "ITGAV", "TIMP1", "CTSD", "COLGALT1", 
+                    "CTSB", "PHYKPL", "MMP2", "BGN", "P3H1", "PCOLCE", "P3H3", "HSPG2", 
+                    "ASPN", "DCN", "MMP11", "MMP14", "VCAN", "COL4A2", "LOX", "COL4A1", 
+                    "COL6A2", "PXDN", "COL6A1", "COL8A1", "MMP19", "COL6A3", "COL6A6", 
+                    "CD47", "DDR2", "COL15A1", "TNXB", "CD151", "SDC2", "LAMA4", 
+                    "HTRA1", "FBLN1", "LTBP2", "NID1", "FBLN2", "LTBP1", "THBS1", 
+                    "FBLN5", "SERPINH1", "TGFB1", "VCAM1", "TGFB3", "LUM", "FN1", 
+                    "COL1A1", "MFAP5", "COL3A1", "COL1A2", "BMP1", "COL5A1", "P4HA1", 
+                    "P4HA2", "COL5A3", "COL5A2", "MFAP2", "P4HB", "FMOD", "FBN1")
+
+DefaultAssay(scRNA_Keratinocytes) <- "RNA"
+
+DoHeatmap(scRNA_Keratinocytes, features = fibrosis_genes, group.by = "Disease_Group") +
+  scale_fill_gradientn(colors = c("blue", "white", "red")) +
+  ggtitle("Fibrosis-associated Gene Expression in Keratinocytes") +
+  theme(axis.text.y = element_text(size = 6))
+
+# ==============================
+# 11. Violin Plots of Differentiation-related Genes
+# ==============================
+diff_genes <- c("CDSN", "DSG1", "DSP", "FLG", "KRT1", "KRT10", "KRT14", 
+                "KRT17", "KRT18", "KRT2", "KRT77", "KRT80", "LCE1A", 
+                "LCE2B", "LCE2C", "LORICRIN", "PERP", "PKP1", "PPL")
+
+for (gene in diff_genes) {
+  if (gene %in% rownames(scRNA_Keratinocytes)) {
+    print(
+      VlnPlot(scRNA_Keratinocytes, features = gene, group.by = "Disease_Group", pt.size = 0.2) +
+        ggtitle(paste("Expression of", gene, "in Keratinocytes")) +
+        theme_minimal()
+    )
+  } else {
+    message("Gene not found in Seurat object: ", gene)
+  }
+}
+
+###############################################################################
