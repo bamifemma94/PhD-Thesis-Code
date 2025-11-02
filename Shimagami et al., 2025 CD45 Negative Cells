@@ -1,0 +1,174 @@
+###############################################################################
+# Script: 06_SSc_PBMC_CITEseq_CD45neg_ADT.R
+# Author: [Your Name]
+# Project: Systemic Sclerosis PBMC CITE-seq Re-analysis (Shimogami et al., 2025)
+# Dataset: E-GEAD-872 (10x Genomics CITE-seq)
+# Description:
+#   Loads CITE-seq .h5 data, integrates RNA + ADT assays,
+#   identifies CD45- (PTPRC-) cells using ADT (antibody-derived tag) signal,
+#   performs normalization, clustering, and prepares for DE and enrichment.
+###############################################################################
+
+# ==============================
+# 1. Load required libraries
+# ==============================
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+# ==============================
+# 2. Define paths
+# ==============================
+zip_file  <- "data/E-GEAD-872.processed.zip"
+unzip_dir <- "data/E-GEAD-872_h5"
+
+# Unzip data if not already extracted
+if (!dir.exists(unzip_dir)) {
+  dir.create(unzip_dir, recursive = TRUE)
+  unzip(zipfile = zip_file, exdir = unzip_dir)
+}
+list.files(unzip_dir)
+
+# ==============================
+# 3. Load and combine all samples (.h5 files)
+# ==============================
+h5_files <- list.files(unzip_dir, pattern = "\\.h5$", full.names = TRUE)
+seurat_list <- list()
+
+for (file in h5_files) {
+  sample_name <- tools::file_path_sans_ext(basename(file))
+  message("Loading sample: ", sample_name)
+  
+  counts <- Read10X_h5(file, use.names = TRUE)
+  rna_counts <- counts$`Gene Expression`
+  
+  # --- Handle ADT if present ---
+  if ("Antibody Capture" %in% names(counts)) {
+    adt_counts <- counts$`Antibody Capture`
+    
+    # Ensure barcodes align between RNA and ADT
+    common_barcodes <- intersect(colnames(rna_counts), colnames(adt_counts))
+    if (length(common_barcodes) > 0) {
+      rna_counts <- rna_counts[, common_barcodes]
+      adt_counts <- adt_counts[, common_barcodes]
+    } else {
+      warning("No matching barcodes for ADT in sample: ", sample_name)
+    }
+  }
+  
+  # Create Seurat object (RNA)
+  seurat_obj <- CreateSeuratObject(
+    counts = rna_counts,
+    project = sample_name,
+    min.cells = 3,
+    min.features = 200
+  )
+  
+  # Add ADT assay (if barcodes matched)
+  if (exists("adt_counts") && all(colnames(seurat_obj) == colnames(adt_counts))) {
+    seurat_obj[["ADT"]] <- CreateAssayObject(counts = adt_counts)
+  }
+  
+  # Annotate metadata
+  seurat_obj$orig.ident   <- sample_name
+  seurat_obj$sample_group <- ifelse(str_starts(sample_name, "HD"), "Healthy", "SSc")
+  seurat_obj$patient_id   <- str_extract(sample_name, "HD[0-9]+|SSc[0-9]+")
+  seurat_obj$timepoint    <- case_when(
+    grepl("before", sample_name) ~ "Before",
+    grepl("after", sample_name)  ~ "After",
+    grepl("onset", sample_name)  ~ "Onset",
+    TRUE ~ NA_character_
+  )
+  
+  seurat_list[[sample_name]] <- seurat_obj
+  rm(adt_counts)
+}
+
+# ==============================
+# 4. Merge all Seurat objects (RNA)
+# ==============================
+merged_seurat <- merge(
+  seurat_list[[1]],
+  y = seurat_list[-1],
+  add.cell.ids = names(seurat_list),
+  project = "SSc_PBMC_CITEseq"
+)
+
+# ==============================
+# 5. Merge ADT assays across samples
+# ==============================
+adt_matrices <- list()
+for (file in h5_files) {
+  sample_name <- tools::file_path_sans_ext(basename(file))
+  counts <- Read10X_h5(file, use.names = TRUE)
+  
+  if ("Antibody Capture" %in% names(counts)) {
+    adt <- counts$`Antibody Capture`
+    colnames(adt) <- paste(sample_name, colnames(adt), sep = "_")
+    adt_matrices[[sample_name]] <- adt
+  }
+}
+
+# Combine all ADT matrices
+adt_combined <- do.call(cbind, adt_matrices)
+adt_combined <- adt_combined[, colnames(merged_seurat)]
+merged_seurat[["ADT"]] <- CreateAssayObject(counts = adt_combined)
+
+Assays(merged_seurat)  # Should return: "RNA" "ADT"
+
+# Save merged object
+saveRDS(merged_seurat, file = "results/SSc_PBMC_CITEseq_merged_with_ADT.rds")
+
+# ==============================
+# 6. Normalize and Scale ADT assay
+# ==============================
+merged_seurat <- NormalizeData(merged_seurat, assay = "ADT", normalization.method = "CLR")
+merged_seurat <- ScaleData(merged_seurat, assay = "ADT")
+
+# ==============================
+# 7. Identify CD45- cells based on ADT
+# ==============================
+cd45_values <- FetchData(merged_seurat, vars = "CD45", assay = "ADT")
+
+hist(cd45_values$adt_CD45,
+     breaks = 100,
+     main = "CLR-normalized CD45 expression",
+     xlab = "CD45 CLR Expression")
+
+# Define threshold empirically (adjust if needed)
+threshold <- 0.1
+
+merged_seurat$CD45_status <- ifelse(cd45_values$adt_CD45 > threshold, "CD45+", "CD45-")
+table(merged_seurat$CD45_status)
+
+# Subset to CD45- cells
+cd45_neg <- subset(merged_seurat, subset = CD45_status == "CD45-")
+cat("Number of CD45-negative cells:", ncol(cd45_neg), "\n")
+
+# Save subset
+saveRDS(cd45_neg, file = "results/SSc_PBMC_CD45neg_subset_threshold0.1.rds")
+
+# ==============================
+# 8. Downstream analysis on CD45- cells
+# ==============================
+DefaultAssay(cd45_neg) <- "RNA"
+
+cd45_neg <- NormalizeData(cd45_neg)
+cd45_neg <- FindVariableFeatures(cd45_neg)
+cd45_neg <- ScaleData(cd45_neg)
+cd45_neg <- RunPCA(cd45_neg)
+cd45_neg <- FindNeighbors(cd45_neg, dims = 1:20)
+cd45_neg <- FindClusters(cd45_neg, resolution = 0.5)
+cd45_neg <- RunUMAP(cd45_neg, dims = 1:20)
+
+DimPlot(cd45_neg, reduction = "umap", label = TRUE) + 
+  ggtitle("CD45- PBMC Subset (SSc and Healthy)")
+
+# ==============================
+# 9. Save for DE and enrichment
+# ==============================
+saveRDS(cd45_neg, "results/SSc_PBMC_CD45neg_ready_for_DE.rds")
+cat("✅ CD45- subset prepared for differential expression and enrichment analysis.\n")
+###############################################################################
