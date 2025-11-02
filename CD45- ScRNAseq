@@ -1,0 +1,192 @@
+###############################################################################
+# Script: 03_CD45Negative_Subset_and_DE_Analysis.R
+# Author: [Your Name]
+# Project: Systemic Sclerosis scRNA-seq (CD45- Population)
+# Dataset: CD45_Negative_merged_QC.rds
+# Description:
+#   Identifies CD45- (non-immune) cells, reclusters them, 
+#   detects lineage-specific markers, and performs DE analysis (SSc vs HC).
+###############################################################################
+
+# ==============================
+# 1. Load Required Libraries
+# ==============================
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(ggrepel)
+})
+
+# ==============================
+# 2. Load QC-filtered Merged Object
+# ==============================
+sc_path <- "data/CD45_Negative_merged_QC.rds"
+CD45_Negative_merged_QC <- readRDS(sc_path)
+
+# ==============================
+# 3. Initial Preprocessing and UMAP
+# ==============================
+CD45_Negative_merged_QC <- CD45_Negative_merged_QC %>%
+  NormalizeData() %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA(npcs = 30) %>%
+  FindNeighbors(dims = 1:20) %>%
+  FindClusters(resolution = 0.8) %>%
+  RunUMAP(dims = 1:20)
+
+p1 <- DimPlot(CD45_Negative_merged_QC, reduction = "umap", label = TRUE) +
+  ggtitle("UMAP 1: Clusters")
+
+p2 <- DimPlot(CD45_Negative_merged_QC, group.by = "orig.ident") +
+  ggtitle("UMAP 2: Sample Origin (orig.ident)")
+
+p1 | p2
+
+# ==============================
+# 4. Inspect PTPRC (CD45) Expression
+# ==============================
+VlnPlot(CD45_Negative_merged_QC, features = "PTPRC", pt.size = 0.1) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  ggtitle("PTPRC Expression Across All Cells")
+
+# ==============================
+# 5. Identify CD45+ and CD45− Cells
+# ==============================
+cd45_pos_cells <- WhichCells(CD45_Negative_merged_QC, expression = PTPRC >= 1)
+cd45_neg_cells <- WhichCells(CD45_Negative_merged_QC, expression = PTPRC < 1)
+
+cat("Total cells:", ncol(CD45_Negative_merged_QC), "\n",
+    "CD45+ (PTPRC+) cells:", length(cd45_pos_cells), "\n",
+    "CD45− (PTPRC−) cells:", length(cd45_neg_cells), "\n",
+    "Percentage CD45−:", round(length(cd45_neg_cells) / ncol(CD45_Negative_merged_QC) * 100, 1), "%\n")
+
+# Add metadata for visualization
+CD45_Negative_merged_QC$CD45_status <- ifelse(
+  FetchData(CD45_Negative_merged_QC, vars = "PTPRC") > 0,
+  "CD45+ Cells", "CD45− Cells"
+)
+
+DimPlot(CD45_Negative_merged_QC, group.by = "CD45_status", pt.size = 0.2) +
+  scale_color_manual(values = c("CD45+ Cells" = "firebrick", "CD45− Cells" = "steelblue")) +
+  ggtitle("CD45+ vs CD45− Cells")
+
+# ==============================
+# 6. Subset to CD45− Cells Only
+# ==============================
+CD45_neg_only <- subset(CD45_Negative_merged_QC, cells = cd45_neg_cells)
+VlnPlot(CD45_neg_only, features = "PTPRC", pt.size = 0.1) + 
+  ggtitle("PTPRC Expression in CD45− Subset")
+
+# ==============================
+# 7. Reclustering CD45− Cells
+# ==============================
+CD45_neg_only <- CD45_neg_only %>%
+  NormalizeData() %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA(npcs = 30) %>%
+  FindNeighbors(dims = 1:20) %>%
+  FindClusters(resolution = 0.4) %>%
+  RunUMAP(dims = 1:20)
+
+# UMAP visualization
+DimPlot(CD45_neg_only, reduction = "umap", label = TRUE) +
+  ggtitle("CD45− Cell Clusters")
+
+# ==============================
+# 8. Marker Gene Exploration
+# ==============================
+FeaturePlot(CD45_neg_only,
+            features = c("EPCAM", "PECAM1", "CAVIN2", "CLDN5", "KRT1", "ENG", "VWF"),
+            pt.size = 0.2) &
+  scale_color_gradientn(colors = c("grey90", "yellow", "red")) +
+  ggtitle("Lineage Marker Expression")
+
+# Identify cluster markers
+CD45_neg_only <- JoinLayers(CD45_neg_only)
+Idents(CD45_neg_only) <- "seurat_clusters"
+
+cd45_neg_markers <- FindAllMarkers(
+  CD45_neg_only,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+
+write.csv(cd45_neg_markers, "results/CD45neg_AllCluster_Markers.csv", row.names = FALSE)
+
+# Top markers per cluster
+top_markers <- cd45_neg_markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 5, order_by = avg_log2FC)
+
+DotPlot(CD45_neg_only, features = unique(top_markers$gene)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Top 5 Markers per CD45− Cluster")
+
+# ==============================
+# 9. Assign Disease Group
+# ==============================
+# Replace with actual mapping between your sample names and conditions
+CD45_neg_only$DiseaseGroup <- ifelse(grepl("SSc", CD45_neg_only$orig.ident), "SSc", "HC")
+
+table(CD45_neg_only$DiseaseGroup)
+
+DimPlot(CD45_neg_only, group.by = "DiseaseGroup", pt.size = 0.2) +
+  scale_color_manual(values = c("SSc" = "firebrick", "HC" = "steelblue")) +
+  ggtitle("CD45− Cells: SSc vs HC")
+
+# ==============================
+# 10. Differential Expression: SSc vs HC
+# ==============================
+scc_vs_hc_markers <- FindMarkers(
+  CD45_neg_only,
+  ident.1 = "SSc",
+  ident.2 = "HC",
+  group.by = "DiseaseGroup",
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+
+# Add significance and export
+volcano_data <- scc_vs_hc_markers %>%
+  mutate(gene = rownames(.),
+         significance = case_when(
+           p_val_adj < 0.05 & avg_log2FC > 0.25 ~ "Upregulated",
+           p_val_adj < 0.05 & avg_log2FC < -0.25 ~ "Downregulated",
+           TRUE ~ "Not Significant"
+         ))
+
+write.csv(volcano_data, "results/SSc_vs_HC_CD45neg_DifferentialExpression.csv", row.names = FALSE)
+
+# ==============================
+# 11. Volcano Plot with Top Gene Labels
+# ==============================
+top_genes <- volcano_data %>%
+  filter(significance %in% c("Upregulated", "Downregulated")) %>%
+  top_n(10, abs(avg_log2FC))
+
+ggplot(volcano_data, aes(x = avg_log2FC, y = -log10(p_val_adj), color = significance)) +
+  geom_point(alpha = 0.6) +
+  geom_text_repel(data = top_genes, aes(label = gene), size = 3, box.padding = 0.5, max.overlaps = 15) +
+  theme_minimal() +
+  scale_color_manual(values = c("Not Significant" = "gray", 
+                                "Upregulated" = "red", 
+                                "Downregulated" = "blue")) +
+  labs(x = "Log2 Fold Change", 
+       y = "-log10(Adjusted p-value)", 
+       title = "Volcano Plot: CD45− Cells (SSc vs HC)") +
+  theme(legend.position = "top")
+
+# ==============================
+# 12. Save Processed CD45− Object
+# ==============================
+saveRDS(CD45_neg_only, "results/CD45neg_SSc_HC_Subset_Final.rds")
+
+cat("✅ CD45− subset analysis complete. Results saved in /results/\n")
+
+###############################################################################
+# End of Script
+###############################################################################
