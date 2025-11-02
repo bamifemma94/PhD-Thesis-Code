@@ -1,0 +1,149 @@
+###############################################################################
+# Script: 01_GSE138669_Preprocessing_and_Integration.R
+# Author: [Your Name]
+# Project: Systemic Sclerosis scRNA-seq Atlas (GSE138669)
+# Description:
+#   Batch import of 22 samples, cell calling with EmptyDrops,
+#   quality control, normalization, and Harmony integration.
+###############################################################################
+
+# ==============================
+# 1. Environment Setup
+# ==============================
+rm(list = ls())
+gc()
+
+library(DropletUtils)
+library(SingleCellExperiment)
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+library(harmony)
+
+# ==============================
+# 2. Define Paths and Samples
+# ==============================
+raw_dir <- "data/GSE138669_RAW"
+sample_names <- c("SSc9","Normal9","Normal10","SSc10","SSc11","SSc12","Normal3",
+                  "SSc3","Normal1","SSc1","Normal4","Normal5","Normal6","SSc4",
+                  "Normal2","Normal7","SSc2","SSc5","Normal8","SSc6","SSc7","SSc8")
+
+h5_files <- list.files(raw_dir, pattern = "\\.h5$", full.names = TRUE)
+scRNAlist <- list()
+
+# ==============================
+# 3. Cell Calling and QC per Sample
+# ==============================
+for (i in seq_along(h5_files)) {
+  cat("\nProcessing sample:", sample_names[i], "\n")
+  
+  counts_raw <- Read10X_h5(h5_files[i])
+  sce <- SingleCellExperiment(assays = list(counts = counts_raw))
+  
+  # ---- Cell calling ----
+  set.seed(100)
+  e.out <- emptyDrops(counts(sce))
+  valid <- which(e.out$FDR <= 0.001)
+  sce_filtered <- sce[, valid]
+  cat("Cells retained:", length(valid), "\n")
+  
+  # ---- Create Seurat object ----
+  seu <- CreateSeuratObject(counts = counts(sce_filtered), project = sample_names[i])
+  seu <- RenameCells(seu, add.cell.id = sample_names[i])
+  seu$orig.ident <- sample_names[i]
+  
+  # ---- QC Metrics ----
+  seu[["percent.mt"]] <- PercentageFeatureSet(seu, pattern = "^MT-")
+  pdf(paste0("qc_plots/", sample_names[i], "_BeforeQC.pdf"))
+  print(
+    VlnPlot(seu, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+            pt.size = 0.01, ncol = 3) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  )
+  dev.off()
+  
+  scRNAlist[[i]] <- seu
+}
+
+# ==============================
+# 4. Merge All Seurat Objects
+# ==============================
+scRNA <- scRNAlist[[1]]
+for (i in 2:length(scRNAlist)) {
+  scRNA <- merge(scRNA, y = scRNAlist[[i]], add.cell.ids = sample_names[i])
+}
+saveRDS(scRNA, "results/scRNA_NoQC.rds")
+cat("Merged object saved: scRNA_NoQC.rds\n")
+
+# ==============================
+# 5. Quality Control Filtering
+# ==============================
+# Define cutoffs
+minGenes <- 200
+maxGenes <- 7500
+maxMT <- 20
+
+scRNA$percent.mt <- PercentageFeatureSet(scRNA, pattern = "^MT-")
+scRNA_filtered <- subset(scRNA, subset = nFeature_RNA > minGenes &
+                                       nFeature_RNA < maxGenes &
+                                       percent.mt < maxMT)
+cat("Cells retained after QC:", ncol(scRNA_filtered), "\n")
+
+# ==============================
+# 6. Normalization, Feature Selection, and Scaling
+# ==============================
+scRNA_filtered <- NormalizeData(scRNA_filtered)
+scRNA_filtered <- FindVariableFeatures(scRNA_filtered)
+scRNA_filtered <- ScaleData(scRNA_filtered)
+scRNA_filtered <- RunPCA(scRNA_filtered)
+ElbowPlot(scRNA_filtered)
+
+# ==============================
+# 7. Harmony Integration
+# ==============================
+scRNA_harmony <- RunHarmony(scRNA_filtered, group.by.vars = "orig.ident", plot_convergence = FALSE)
+scRNA_harmony <- RunUMAP(scRNA_harmony, reduction = "harmony", dims = 1:20)
+scRNA_harmony <- FindNeighbors(scRNA_harmony, reduction = "harmony", dims = 1:20)
+scRNA_harmony <- FindClusters(scRNA_harmony, resolution = 0.8)
+
+# ==============================
+# 8. Visualization
+# ==============================
+p_before <- DimPlot(scRNA_filtered, reduction = "umap", group.by = "orig.ident") +
+  ggtitle("Before Harmony Integration")
+
+p_after <- DimPlot(scRNA_harmony, reduction = "umap", group.by = "orig.ident") +
+  ggtitle("After Harmony Integration")
+
+pdf("results/Harmony_Integration_Before_After.pdf", width = 10, height = 5)
+print(p_before | p_after)
+dev.off()
+
+# ==============================
+# 9. Save Integrated Object
+# ==============================
+saveRDS(scRNA_harmony, file = "results/scRNA_GSE138669_Harmony_Integrated.rds")
+cat("✅ Saved integrated Seurat object: scRNA_GSE138669_Harmony_Integrated.rds\n")
+
+# ==============================
+# 10. Cluster Visualization
+# ==============================
+DimPlot(scRNA_harmony, reduction = "umap", label = TRUE) +
+  ggtitle("GSE138669: Harmony-Integrated Clusters")
+
+# ==============================
+# 11. Marker Gene Identification
+# ==============================
+keratinocyte_markers <- FindAllMarkers(scRNA_harmony,
+                                       logfc.threshold = 0.25,
+                                       min.pct = 0.1,
+                                       only.pos = TRUE,
+                                       test.use = "DESeq2",
+                                       slot = "counts")
+
+write.csv(keratinocyte_markers, "results/GSE138669_AllCluster_Markers.csv", row.names = TRUE)
+cat("✅ Marker table saved: results/GSE138669_AllCluster_Markers.csv\n")
+
+###############################################################################
+# End of Script
+###############################################################################
