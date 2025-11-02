@@ -1,0 +1,105 @@
+###############################################################
+# Script: 03_IPA_CanonicalPathwayPlot.R
+# Author: [Your Name or GitHub handle]
+# Date: [Month Year]
+# -------------------------------------------------------------
+# Purpose:
+#   Generate publication-quality bar plots of canonical pathways
+#   from Ingenuity Pathway Analysis (IPA) output.
+#
+#   Each pathway is colored by Z-score and ordered by significance
+#   (-log(p-value)).
+#
+# Input:
+#   CSV file containing three columns:
+#     1. Pathway
+#     2. LogPValue  (e.g. -log10(p-value))
+#     3. ZScore
+#
+# Output:
+#   High-resolution ggplot bar chart(s)
+#   (top pathways visualized, saved as .png or .pdf if desired)
+###############################################################
+
+# --- Load required libraries ---
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+# --- Define input file path (edit as needed) ---
+# Example: data exported directly from IPA
+ipa_file <- "data/Epidermis_VEDOSS_vs_HC_CanonicalPathways.csv"
+
+# --- Load the IPA results ---
+ipa_data <- read.csv(ipa_file, check.names = FALSE)
+
+# --- Clean and standardize column names ---
+if (all(c("Pathway", "LogPValue", "ZScore") %in% names(ipa_data))) {
+  ipa_data <- ipa_data[, c("Pathway", "LogPValue", "ZScore")]
+} else {
+  ipa_data <- ipa_data[, 1:3]
+  names(ipa_data) <- c("Pathway", "LogPValue", "ZScore")
+}
+
+# --- Ensure proper data types ---
+ipa_data <- ipa_data %>%
+  mutate(
+    Pathway   = trimws(as.character(Pathway)),
+    LogPValue = suppressWarnings(as.numeric(LogPValue)),
+    ZScore    = suppressWarnings(as.numeric(ZScore))
+  ) %>%
+  filter(!is.na(Pathway) & Pathway != "",
+         !is.na(LogPValue),
+         !is.na(ZScore))
+
+# --- Optional: filter by Z-score magnitude (≥ 2 or ≤ -2) ---
+ipa_data <- ipa_data %>% filter(abs(ZScore) >= 2)
+
+# --- Sort by -log(p-value) (most significant first) ---
+ipa_data <- ipa_data %>% arrange(desc(LogPValue))
+
+# --- Convert pathway names into ordered factors ---
+ipa_data$Pathway <- factor(ipa_data$Pathway, levels = rev(unique(ipa_data$Pathway)))
+
+# --- Split into top 25 and next 25 (if large list) ---
+ipa_top25  <- ipa_data[1:min(25, nrow(ipa_data)), ]
+ipa_next25 <- ipa_data[26:min(50, nrow(ipa_data)), ]
+
+# --- Plotting function ---
+plot_pathways <- function(data, title) {
+  if (nrow(data) == 0) {
+    return(ggplot() + theme_void() + ggtitle(paste0(title, " (no data available)")))
+  }
+  
+  ggplot(data, aes(x = Pathway, y = LogPValue, fill = ZScore)) +
+    geom_bar(stat = "identity", color = "black", na.rm = TRUE) +
+    coord_flip() +
+    scale_fill_gradient2(
+      low = "blue", mid = "white", high = "orange",
+      midpoint = 0, name = "Z-Score"
+    ) +
+    labs(
+      title = title,
+      x = "Canonical Pathways",
+      y = "-log(p-value)"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.y = element_text(size = 9),
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    )
+}
+
+# --- Generate plots ---
+plot1 <- plot_pathways(ipa_top25,  "Top 25 Canonical Pathways")
+plot2 <- plot_pathways(ipa_next25, "Next 25 Canonical Pathways")
+
+# --- Display side-by-side (if both exist) ---
+(plot1 | plot2)
+
+# --- Optional: save figures ---
+# ggsave("output/IPA_TopPathways.png", plot = (plot1 | plot2), width = 14, height = 10, dpi = 300)
+# ggsave("output/IPA_TopPathways.pdf", plot = (plot1 | plot2), width = 14, height = 10)
+
+cat("✓ IPA canonical pathway plots generated successfully.\n")
+cat("✓ Edit 'ipa_file' path for different comparisons (e.g. VEDOSS vs HC, SSc vs HC, etc.)\n")
