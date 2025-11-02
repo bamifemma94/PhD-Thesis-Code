@@ -1,0 +1,180 @@
+###############################################################################
+# Script: 07_Keratinocyte_Stromal_Crosstalk_GSE138669.R
+# Author: [Your Name]
+# Project: Systemic Sclerosis – Keratinocyte–Stromal Crosstalk Analysis
+# Dataset: GSE138669
+# Description:
+#   Investigates ligand–receptor interactions between keratinocytes and fibroblasts
+#   in systemic sclerosis (SSc) versus healthy control (HC) using CellChat.
+###############################################################################
+
+# ==============================
+# 1. Load required libraries
+# ==============================
+library(Seurat)
+library(CellChat)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(ggplot2)
+library(dplyr)
+library(circlize)
+library(ggalluvial)
+library(pheatmap)
+
+# ==============================
+# 2. Load annotated Seurat object
+# ==============================
+seurat_path <- "data/scRNA_Cluster_dim_20_annotated.rds"
+scRNA <- readRDS(seurat_path)
+
+# ==============================
+# 3. Annotate clusters and disease groups
+# ==============================
+cluster_annotations <- c(
+  "Basal Keratinocytes", "Terminal Keratinocytes", "Fibroblast", 
+  "Endothelial Cells", "Endothelial Cells", "Endothelial Cells", 
+  "KRT6A Keratinocyte", "Dendritic Cells", "Fibroblast", "SFRP2+ Fibroblast", 
+  "Dendritic Cell", "Fibroblast", "T-Cell", "CA6 Secretory", 
+  "Smooth Muscle", "Unknown", "Smooth Muscle", "Keratinocytes", 
+  "Keratinocytes", "Schwann Cells", "T cells, NK cells", "Melanocytes", 
+  "Endothelial Cells", "Lymphatic Endothelial Cells", "Fibroblast", 
+  "B Cells", "B Cells"
+)
+
+scRNA$Cluster_Labels <- factor(scRNA$seurat_clusters, levels = 0:26, labels = cluster_annotations)
+Idents(scRNA) <- scRNA$Cluster_Labels
+scRNA$Disease_Group <- ifelse(grepl("SSc", scRNA$orig.ident), "SSc", "Healthy Control")
+
+# ==============================
+# 4. Subset to keratinocytes and fibroblasts
+# ==============================
+celltypes_of_interest <- c(
+  "Basal Keratinocytes", "Terminal Keratinocytes", "KRT6A Keratinocyte",
+  "Fibroblast", "SFRP2+ Fibroblast"
+)
+
+scRNA_subset <- subset(scRNA, Cluster_Labels %in% celltypes_of_interest)
+scRNA_subset$Cluster_Labels <- droplevels(scRNA_subset$Cluster_Labels)
+
+# ==============================
+# 5. Split by condition (SSc vs HC)
+# ==============================
+scRNA_SSc <- subset(scRNA_subset, Disease_Group == "SSc")
+scRNA_HC  <- subset(scRNA_subset, Disease_Group == "Healthy Control")
+
+# ==============================
+# 6. Create CellChat objects
+# ==============================
+CellChatDB <- CellChatDB.human
+genes_of_interest <- c("SDC1", "MMP9", "ADAM15", "IGF1", "HEY1", "NOTCH1", "NOTCH3")
+
+# --- SSc ---
+cellchat_SSc <- createCellChat(
+  object = GetAssayData(scRNA_SSc, assay = "RNA", slot = "data"),
+  meta = scRNA_SSc@meta.data,
+  group.by = "Cluster_Labels"
+)
+cellchat_SSc@DB <- CellChatDB
+cellchat_SSc@DB$interaction <- subset(CellChatDB$interaction,
+                                      ligand %in% genes_of_interest | receptor %in% genes_of_interest)
+
+# --- HC ---
+cellchat_HC <- createCellChat(
+  object = GetAssayData(scRNA_HC, assay = "RNA", slot = "data"),
+  meta = scRNA_HC@meta.data,
+  group.by = "Cluster_Labels"
+)
+cellchat_HC@DB <- CellChatDB
+cellchat_HC@DB$interaction <- subset(CellChatDB$interaction,
+                                     ligand %in% genes_of_interest | receptor %in% genes_of_interest)
+
+# ==============================
+# 7. Process and compute interactions
+# ==============================
+for (cc in list(cellchat_SSc, cellchat_HC)) {
+  cc <- subsetData(cc)
+  cc <- identifyOverExpressedGenes(cc)
+  cc <- identifyOverExpressedInteractions(cc)
+  cc <- computeCommunProb(cc)
+  cc <- filterCommunication(cc, min.cells = 10)
+  cc <- aggregateNet(cc)
+}
+
+# ==============================
+# 8. Merge and compare networks
+# ==============================
+cellchat_merged <- mergeCellChat(
+  list(SSc = cellchat_SSc, Healthy = cellchat_HC),
+  add.names = c("SSc", "Healthy")
+)
+
+# ==============================
+# 9. Extract communication data
+# ==============================
+df_SSc <- subsetCommunication(cellchat_SSc) %>% mutate(group = "SSc")
+df_HC  <- subsetCommunication(cellchat_HC)  %>% mutate(group = "Healthy Control")
+df_combined <- rbind(df_SSc, df_HC)
+
+df_filtered <- df_combined %>%
+  filter(ligand %in% genes_of_interest | receptor %in% genes_of_interest)
+
+# ==============================
+# 10. Visualizations
+# ==============================
+## Bubble plot comparison
+netVisual_bubble(cellchat_merged,
+                 comparison = c(1, 2),
+                 signaling = c("NOTCH", "IGF", "COLLAGEN"))
+
+## Differential network
+netVisual_diffInteraction(cellchat_merged, weight.scale = TRUE)
+netVisual_diffInteraction(cellchat_merged, signaling = "NOTCH", measure = "weight")
+
+## Chord diagram
+df_filtered$source_group <- paste(df_filtered$source, df_filtered$group, sep = "_")
+df_filtered$target_group <- paste(df_filtered$target, df_filtered$group, sep = "_")
+chord_matrix <- table(df_filtered$source_group, df_filtered$target_group)
+chordDiagram(as.matrix(chord_matrix), transparency = 0.3)
+
+## Sankey diagram
+ggplot(df_filtered,
+       aes(axis1 = group, axis2 = ligand, axis3 = receptor, axis4 = target)) +
+  geom_alluvium(aes(fill = pathway_name), width = 1/12) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 3) +
+  scale_x_discrete(limits = c("Group", "Ligand", "Receptor", "Target"), expand = c(.05, .05)) +
+  theme_minimal() +
+  ggtitle("Keratinocyte–Fibroblast Crosstalk (SSc vs Healthy)")
+
+# ==============================
+# 11. Export results
+# ==============================
+write.csv(df_filtered, "results/Keratinocyte_Fibroblast_SSc_vs_HC_Crosstalk.csv", row.names = FALSE)
+
+# ==============================
+# 12. (Optional) CellChat on full dataset
+# ==============================
+data.input <- GetAssayData(scRNA, assay = "RNA", slot = "data")
+cellchat_full <- createCellChat(object = data.input, meta = scRNA@meta.data, group.by = "Cluster_Labels")
+
+cellchat_full@DB <- CellChatDB
+cellchat_full@DB$interaction <- subset(CellChatDB$interaction,
+                                       ligand %in% genes_of_interest | receptor %in% genes_of_interest)
+
+cellchat_full <- subsetData(cellchat_full)
+cellchat_full <- identifyOverExpressedGenes(cellchat_full)
+cellchat_full <- identifyOverExpressedInteractions(cellchat_full)
+cellchat_full <- computeCommunProb(cellchat_full)
+cellchat_full <- filterCommunication(cellchat_full, min.cells = 10)
+cellchat_full <- aggregateNet(cellchat_full)
+
+# Bubble visualization for full tissue
+netVisual_bubble(cellchat_full, signaling = unique(cellchat_full@netP$pathways))
+
+# Targeted signaling visualization
+netVisual_bubble(cellchat_full,
+                 sources.use = c("Basal Keratinocytes", "Terminal Keratinocytes", "KRT6A Keratinocyte"),
+                 signaling = c("NOTCH", "IGF", "COLLAGEN"))
+
+###############################################################################
